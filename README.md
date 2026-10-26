@@ -1,0 +1,27 @@
+# ScriptForge
+
+Masaüstü penceresi: ne istediğini yaz → LLM (Claude) Python scriptini yazar → çalıştırır →
+hata olursa hatayı LLM'e geri verip düzelttirir → başarılı olana (veya deneme limitine) kadar tekrarlar.
+Tek tık.
+
+## Kurulum
+```bash
+pip install -r requirements.txt     # Linux: sudo apt install python3-tk
+export ANTHROPIC_API_KEY=sk-ant-...
+python -m scriptforge
+```
+
+## Özellikler
+- Üret → çalıştır → hata çıktısıyla otomatik debug döngüsü (varsayılan 4 deneme)
+- Script `# requirements:` satırı yazarsa paketler `~/ScriptForge/libs` içine kurulur
+- Zaman aşımı, Durdur butonu, "çalıştırmadan önce onayla" seçeneği
+- Her çalıştırma `~/ScriptForge/scripts/<tarih>/script.py` olarak saklanır (`SCRIPTFORGE_HOME` ile değişir)
+
+## Güvenlik
+Üretilen kod **senin kullanıcı yetkinle** çalışır; sandbox yoktur. Güvenmediğin istekler için
+"çalıştırmadan önce onayla" kutusunu işaretle.
+
+## Test
+```bash
+pip install pytest && pytest
+```
