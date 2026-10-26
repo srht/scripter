@@ -7,7 +7,7 @@ import queue
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
 from . import core
 
@@ -22,6 +22,7 @@ class App(tk.Tk):
         self.proc: list = []
         self.cur_out = None
         self._lib_cur = None
+        self.edit_entry = None  # saved script currently open for editing in the "Üret" tab
         self.worker: threading.Thread | None = None
         self._build()
         self.after(100, self._drain)
@@ -33,7 +34,8 @@ class App(tk.Tk):
         lib = ttk.Frame(nb)
         nb.add(gen, text="Üret")
         nb.add(lib, text="📚 Kitaplık")
-        nb.bind("<<NotebookTabChanged>>", lambda e: self.lib_refresh() if nb.index("current") == 1 else None)
+        self.nb = nb
+        nb.bind("<<NotebookTabChanged>>", lambda e: self._on_tab())
         self._build_library(lib)
         top = ttk.Frame(gen, padding=8)
         top.pack(fill="x")
@@ -66,7 +68,7 @@ class App(tk.Tk):
         self.timeout = tk.IntVar(value=60)
         ttk.Spinbox(top, from_=0, to=3600, textvariable=self.timeout, width=6).grid(row=0, column=3)
 
-        req = ttk.LabelFrame(gen, text="Ne yapmak istiyorsun?", padding=6)
+        req = self.req_frame = ttk.LabelFrame(gen, text="Ne yapmak istiyorsun?", padding=6)
         req.pack(fill="x", padx=8)
         self.request = scrolledtext.ScrolledText(req, height=4, wrap="word")
         self.request.pack(fill="x")
@@ -78,6 +80,10 @@ class App(tk.Tk):
         self.btn.pack(side="left")
         self.stop_btn = ttk.Button(bar, text="■ Durdur", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
+        self.edit_lbl = ttk.Label(bar, text="", foreground="#1a6fb5")
+        self.save_btn = ttk.Button(bar, text="💾 Kaydet", command=self.save_pane)
+        self.undo_btn = ttk.Button(bar, text="↶ Önceki sürüm", command=self.undo_pane)
+        self.new_btn = ttk.Button(bar, text="✕ Yeni script", command=self.exit_edit)
         self.review = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Çalıştırmadan önce kodu onayla", variable=self.review).pack(side="left", padx=12)
         self.status = ttk.Label(bar, text="Hazır")
@@ -140,7 +146,7 @@ class App(tk.Tk):
         self.lib_run_btn.pack(side="left")
         ttk.Button(bar, text="■ Durdur", command=self.stop).pack(side="left", padx=4)
         ttk.Button(bar, text="💾 Kaydet", command=lambda: self._lib_save(True)).pack(side="left", padx=(12, 4))
-        ttk.Button(bar, text="✨ LLM ile değiştir", command=self.lib_revise).pack(side="left", padx=4)
+        ttk.Button(bar, text="✨ LLM ile değiştir →", command=self.edit_in_generator).pack(side="left", padx=4)
         ttk.Button(bar, text="↶ Önceki sürüm", command=self.lib_restore).pack(side="left", padx=4)
         ttk.Button(bar, text="Kopyala", command=self.lib_copy).pack(side="left", padx=4)
         ttk.Button(bar, text="Klasörü aç", command=self.lib_open).pack(side="left", padx=4)
@@ -231,45 +237,80 @@ class App(tk.Tk):
             self._lib_save()
         self._lib_load(e)
 
-    def lib_revise(self):
+    def _on_tab(self):
+        if self.nb.index("current") != 1:
+            return
+        self.lib_refresh()
+        cur = self._lib_cur
+        if cur and not self._lib_dirty():  # pick up changes made in the "Üret" tab
+            for e in self.entries.values():
+                if e.dir == cur.dir:
+                    self._lib_load(e)
+                    break
+
+    # -- edit mode (Üret tab) ------------------------------------------
+    def edit_in_generator(self):
+        """Open the selected library script in the 'Üret' tab: instruction box on top, code below."""
         e = self._lib_cur
         if not e:
             return messagebox.showinfo("ScriptForge", "Listeden bir script seç.")
         if self.worker and self.worker.is_alive():
             return
-        if not self.key.get().strip():
-            return messagebox.showerror("ScriptForge", f"{self.provider.get()} API key gerekli (Üret sekmesinde).")
-        instr = simpledialog.askstring("LLM ile değiştir", "Scriptte ne değişsin?", parent=self)
-        if not instr or not instr.strip():
+        if self._lib_dirty() and not self._lib_save():
             return
-        if not self._lib_save():
+        self.edit_entry = e
+        self.code.delete("1.0", "end")
+        self.code.insert("1.0", e.code)
+        self.log.delete("1.0", "end")
+        self.request.delete("1.0", "end")
+        self._set_edit_mode(True)
+        self.nb.select(0)
+        self.request.focus_set()
+
+    def _set_edit_mode(self, on: bool):
+        e = self.edit_entry
+        if on and e:
+            self.req_frame.config(text="Scriptte ne değişsin? (boş bırakırsan LLM'siz, koddaki haliyle çalıştırır)")
+            self.btn.config(text="▶ Değiştir, Debug Et ve Çalıştır")
+            self.edit_lbl.config(text="✏ Düzenleniyor: " + e.request.replace("\n", " ")[:50])
+            for w in (self.edit_lbl, self.save_btn, self.undo_btn, self.new_btn):
+                w.pack(side="left", padx=6)
+        else:
+            self.req_frame.config(text="Ne yapmak istiyorsun?")
+            self.btn.config(text="▶ Üret, Debug Et ve Çalıştır")
+            for w in (self.edit_lbl, self.save_btn, self.undo_btn, self.new_btn):
+                w.pack_forget()
+
+    def exit_edit(self):
+        if self.worker and self.worker.is_alive():
             return
-        self.cancel_flag.clear()
-        self.cur_out = self.lib_out
-        self.lib_out.delete("1.0", "end")
-        self.lib_run_btn.config(state="disabled")
-        self.lib_status.config(text="LLM çalışıyor…")
-        prov, key, model = self.provider.get(), self.key.get().strip(), self.model.get().strip()
-        attempts, timeout = self.attempts.get(), self.timeout.get()
+        self.edit_entry = None
+        self._set_edit_mode(False)
+        self.code.delete("1.0", "end")
+        self.request.delete("1.0", "end")
 
-        def job():
-            try:
-                llm = core.make_llm(prov, key, model)
-                core.forge(
-                    instr.strip(), llm,
-                    log=lambda m: self.q.put(("lib_log", m)),
-                    on_code=lambda c: self.q.put(("lib_code", c)),
-                    max_attempts=attempts, timeout=timeout,
-                    cancelled=self.cancel_flag.is_set, proc_holder=self.proc,
-                    on_output=self._emit, base=e,
-                )
-                self.q.put(("lib_log", "\nÖnceki sürüm 'history' klasöründe; '↶ Önceki sürüm' ile geri alabilirsin."))
-            except Exception as ex:
-                self.q.put(("lib_log", f"HATA: {ex}"))
-            self.q.put(("lib_done", None))
+    def save_pane(self) -> bool:
+        e = self.edit_entry
+        if not e:
+            return False
+        try:
+            core.save_code(e, self.code.get("1.0", "end-1c"))
+        except OSError as ex:
+            messagebox.showerror("ScriptForge", f"Kaydedilemedi: {ex}")
+            return False
+        self.status.config(text="Kaydedildi")
+        return True
 
-        self.worker = threading.Thread(target=job, daemon=True)
-        self.worker.start()
+    def undo_pane(self):
+        e = self.edit_entry
+        if not e or (self.worker and self.worker.is_alive()):
+            return
+        if self.save_pane() and core.restore_previous(e):
+            self.code.delete("1.0", "end")
+            self.code.insert("1.0", e.code)
+            self.status.config(text="Önceki sürüme dönüldü (tekrar basarsan geri gelir)")
+        else:
+            messagebox.showinfo("ScriptForge", "Önceki sürüm yok.")
 
     def lib_restore(self):
         e = self._lib_cur
@@ -364,17 +405,24 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             return
         task = self.request.get("1.0", "end").strip()
-        if not task:
+        base = self.edit_entry
+        if base is None and not task:
             return messagebox.showinfo("ScriptForge", "Önce bir istek yaz.")
-        if not self.key.get().strip():
+        if task and not self.key.get().strip():
             return messagebox.showerror("ScriptForge", f"{self.provider.get()} API key gerekli.")
+        if base is not None and not self.save_pane():  # manual edits in the code pane are kept
+            return
+        cfg = dict(
+            provider=self.provider.get(), key=self.key.get().strip(), model=self.model.get().strip(),
+            attempts=self.attempts.get(), timeout=self.timeout.get(), review=self.review.get(),
+        )
         self.cancel_flag.clear()
         self.cur_out = self.log
         self.log.delete("1.0", "end")
         self.btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.status.config(text="Çalışıyor…")
-        self.worker = threading.Thread(target=self._work, args=(task,), daemon=True)
+        self.worker = threading.Thread(target=self._work, args=(task, base, cfg), daemon=True)
         self.worker.start()
 
     def stop(self):
@@ -392,19 +440,26 @@ class App(tk.Tk):
         ev.wait()
         return bool(box and box[0])
 
-    def _work(self, task):
+    def _work(self, task, base, cfg):
         try:
-            llm = core.make_llm(self.provider.get(), self.key.get().strip(), self.model.get().strip())
+            if base is not None and not task:  # no instruction: just run the (edited) script
+                res = core.run_entry(base, lambda m: self.q.put(("log", m)), cfg["timeout"], self.proc,
+                                     on_output=self._emit)
+                self.q.put(("lib_refresh", None))
+                self.q.put(("done", "Başarılı" if res.ok else "Başarısız"))
+                return
+            llm = core.make_llm(cfg["provider"], cfg["key"], cfg["model"])
             out = core.forge(
                 task, llm,
                 log=lambda m: self.q.put(("log", m)),
                 on_code=lambda c: self.q.put(("code", c)),
-                max_attempts=self.attempts.get(),
-                timeout=self.timeout.get(),
-                confirm=self._confirm if self.review.get() else None,
+                max_attempts=cfg["attempts"],
+                timeout=cfg["timeout"],
+                confirm=self._confirm if cfg["review"] else None,
                 cancelled=self.cancel_flag.is_set,
                 proc_holder=self.proc,
                 on_output=self._emit,
+                base=base,
             )
             ok = out.result is not None and out.result.ok
             self.q.put(("log", f"\nKaydedildi: {out.path}"))
@@ -452,6 +507,8 @@ class App(tk.Tk):
                     box.append(messagebox.askyesno("Onay", "Üretilen kod çalıştırılsın mı?\n(Sağ panelde görebilirsin)"))
                     ev.set()
                 elif kind == "done":
+                    if self.edit_entry is not None and val == "Başarılı":
+                        self.request.delete("1.0", "end")  # ready for the next instruction
                     self.status.config(text=val)
                     self.btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
