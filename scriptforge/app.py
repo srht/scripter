@@ -25,18 +25,34 @@ class App(tk.Tk):
     def _build(self):
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
-        ttk.Label(top, text="API Key:").grid(row=0, column=0, sticky="w")
-        self.key = tk.StringVar(value=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", ""))
-        ttk.Entry(top, textvariable=self.key, show="•", width=40).grid(row=0, column=1, padx=4)
-        ttk.Label(top, text="Model:").grid(row=0, column=2, padx=(12, 0))
+        ttk.Label(top, text="Sağlayıcı:").grid(row=0, column=0, sticky="w")
+        self.provider = tk.StringVar(value="Gemini")
+        pc = ttk.Combobox(top, textvariable=self.provider, values=list(core.PROVIDERS), state="readonly", width=11)
+        pc.grid(row=0, column=1, padx=4)
+        pc.bind("<<ComboboxSelected>>", lambda e: self._on_provider())
+        ttk.Label(top, text="API Key:").grid(row=0, column=2, padx=(8, 0))
+        self.keys = {p: core.env_key(p) for p in core.PROVIDERS}
+        self.key = tk.StringVar(value=self.keys["Gemini"])
+        ttk.Entry(top, textvariable=self.key, show="•", width=30).grid(row=0, column=3, padx=4)
+        ttk.Label(top, text="Model:").grid(row=0, column=4, padx=(8, 0))
         self.model = tk.StringVar(value=core.DEFAULT_MODEL)
-        ttk.Entry(top, textvariable=self.model, width=22).grid(row=0, column=3, padx=4)
-        ttk.Label(top, text="Maks. deneme:").grid(row=0, column=4, padx=(12, 0))
+        self.model_box = ttk.Combobox(top, textvariable=self.model, width=38, values=[core.DEFAULT_MODEL])
+        self.model_box.grid(row=0, column=5, padx=4)
+        self.refresh_btn = ttk.Button(top, text="⟳ Ücretsiz modelleri getir", command=self.refresh_models)
+        self.refresh_btn.grid(row=0, column=6, padx=4)
+        self.refresh_btn.config(state="disabled")
+        self._prov = "Gemini"
+        self.free_only = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Sadece ücretsiz", variable=self.free_only).grid(row=0, column=7)
+        top2 = ttk.Frame(self, padding=(8, 0))
+        top2.pack(fill="x")
+        top = top2
+        ttk.Label(top, text="Maks. deneme:").grid(row=0, column=0, padx=(12, 0))
         self.attempts = tk.IntVar(value=4)
-        ttk.Spinbox(top, from_=1, to=10, textvariable=self.attempts, width=4).grid(row=0, column=5)
-        ttk.Label(top, text="Zaman aşımı (sn):").grid(row=0, column=6, padx=(12, 0))
+        ttk.Spinbox(top, from_=1, to=10, textvariable=self.attempts, width=4).grid(row=0, column=1)
+        ttk.Label(top, text="Zaman aşımı (sn):").grid(row=0, column=2, padx=(12, 0))
         self.timeout = tk.IntVar(value=60)
-        ttk.Spinbox(top, from_=5, to=3600, textvariable=self.timeout, width=6).grid(row=0, column=7)
+        ttk.Spinbox(top, from_=5, to=3600, textvariable=self.timeout, width=6).grid(row=0, column=3)
 
         req = ttk.LabelFrame(self, text="Ne yapmak istiyorsun?", padding=6)
         req.pack(fill="x", padx=8)
@@ -67,6 +83,34 @@ class App(tk.Tk):
         pane.add(f, weight=1)
         return t
 
+    # -- provider / models ---------------------------------------------
+    def _on_provider(self):
+        old = getattr(self, "_prov", "Gemini")
+        self.keys[old] = self.key.get()
+        new = self.provider.get()
+        self._prov = new
+        self.key.set(self.keys[new])
+        self.model.set(core.PROVIDERS[new]["default_model"])
+        self.model_box.config(values=[core.PROVIDERS[new]["default_model"]])
+        self.refresh_btn.config(state="normal" if new == "OpenRouter" else "disabled")
+        if new == "OpenRouter":
+            self.refresh_models()
+
+    def refresh_models(self):
+        if self.provider.get() != "OpenRouter":
+            return messagebox.showinfo("ScriptForge", "Model listesi sadece OpenRouter için getirilir.")
+        self.status.config(text="Modeller getiriliyor…")
+        free = self.free_only.get()
+
+        def job():
+            try:
+                self.q.put(("models", core.list_openrouter_models(free)))
+            except Exception as e:
+                self.q.put(("log", f"Model listesi alınamadı: {e}"))
+                self.q.put(("done", "Hata"))
+
+        threading.Thread(target=job, daemon=True).start()
+
     # -- actions -------------------------------------------------------
     def start(self):
         if self.worker and self.worker.is_alive():
@@ -75,7 +119,7 @@ class App(tk.Tk):
         if not task:
             return messagebox.showinfo("ScriptForge", "Önce bir istek yaz.")
         if not self.key.get().strip():
-            return messagebox.showerror("ScriptForge", "Gemini API key gerekli (GEMINI_API_KEY).")
+            return messagebox.showerror("ScriptForge", f"{self.provider.get()} API key gerekli.")
         self.cancel_flag.clear()
         self.log.delete("1.0", "end")
         self.btn.config(state="disabled")
@@ -101,7 +145,7 @@ class App(tk.Tk):
 
     def _work(self, task):
         try:
-            llm = core.LLM(self.key.get().strip(), self.model.get().strip())
+            llm = core.make_llm(self.provider.get(), self.key.get().strip(), self.model.get().strip())
             out = core.forge(
                 task, llm,
                 log=lambda m: self.q.put(("log", m)),
@@ -129,6 +173,9 @@ class App(tk.Tk):
                 elif kind == "code":
                     self.code.delete("1.0", "end")
                     self.code.insert("1.0", val)
+                elif kind == "models":
+                    self.model_box.config(values=["openrouter/free"] + [m for m in val if m != "openrouter/free"])
+                    self.status.config(text=f"{len(val)} model bulundu")
                 elif kind == "ask":
                     ev, box = val
                     box.append(messagebox.askyesno("Onay", "Üretilen kod çalıştırılsın mı?\n(Sağ panelde görebilirsin)"))

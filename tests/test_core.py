@@ -58,3 +58,25 @@ def test_gemini_client_parses_and_keeps_history(monkeypatch):
     assert "print(1)" in llm.ask("hi")
     assert "gemini-x:generateContent" in seen["url"] and seen["key"] == "KEY"
     assert [c["role"] for c in llm.contents] == ["user", "model"]
+
+
+def test_openrouter_client_and_free_filter(monkeypatch):
+    import io, json, urllib.request
+
+    def fake_urlopen(req, timeout=0):
+        if req.full_url.endswith("/models"):
+            return io.BytesIO(json.dumps({"data": [
+                {"id": "a/b:free", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "c/d", "pricing": {"prompt": "0.001", "completion": "0.002"}},
+                {"id": "e/f", "pricing": {"prompt": "0", "completion": "0"}},
+            ]}).encode())
+        assert req.headers["Authorization"] == "Bearer K"
+        body = json.loads(req.data)
+        assert body["model"] == "a/b:free" and body["messages"][0]["role"] == "system"
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": "```python\nprint(2)\n```"}}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert core.list_openrouter_models(True) == ["a/b:free", "e/f"]
+    assert len(core.list_openrouter_models(False)) == 3
+    llm = core.make_llm("OpenRouter", "K", "a/b:free")
+    assert "print(2)" in llm.ask("x") and llm.messages[-1]["role"] == "assistant"

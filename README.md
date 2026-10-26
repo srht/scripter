@@ -1,17 +1,19 @@
 # ScriptForge
 
-Masaüstü penceresi: ne istediğini yaz → LLM (Google Gemini) Python scriptini yazar → çalıştırır →
+Masaüstü penceresi: ne istediğini yaz → LLM (Gemini veya OpenRouter) Python scriptini yazar → çalıştırır →
 hata olursa hatayı LLM'e geri verip düzelttirir → başarılı olana (veya deneme limitine) kadar tekrarlar.
 Tek tık.
 
 ## Kurulum
 ```bash
 # Linux: sudo apt install python3-tk  (ek pip paketi gerekmez)
-export GEMINI_API_KEY=...   # https://aistudio.google.com/apikey
+export GEMINI_API_KEY=...       # https://aistudio.google.com/apikey
+export OPENROUTER_API_KEY=...   # https://openrouter.ai/keys (opsiyonel)
 python -m scriptforge
 ```
 
 ## Özellikler
+- Sağlayıcı seçimi: Gemini veya OpenRouter. OpenRouter'da "Ücretsiz modelleri getir" ile `:free` modeller listelenir, açılır kutudan seçilir (`openrouter/free` otomatik ücretsiz model seçer). Ücretsiz modellerin kalitesi/limiti değişkendir.
 - Üret → çalıştır → hata çıktısıyla otomatik debug döngüsü (varsayılan 4 deneme)
 - Script `# requirements:` satırı yazarsa paketler `~/ScriptForge/libs` içine kurulur
 - Zaman aşımı, Durdur butonu, "çalıştırmadan önce onayla" seçeneği

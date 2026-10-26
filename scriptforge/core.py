@@ -10,7 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+PROVIDERS = {
+    "Gemini": {"default_model": "gemini-2.5-flash", "env": ("GEMINI_API_KEY", "GOOGLE_API_KEY")},
+    "OpenRouter": {"default_model": "openrouter/free", "env": ("OPENROUTER_API_KEY",)},
+}
+DEFAULT_MODEL = PROVIDERS["Gemini"]["default_model"]
 WORKSPACE = Path(os.environ.get("SCRIPTFORGE_HOME", Path.home() / "ScriptForge"))
 
 SYSTEM_PROMPT = """You write single-file Python 3 scripts that do exactly what the user asks.
@@ -101,6 +105,75 @@ class LLM:
             raise RuntimeError(f"Gemini boş/engellenmiş yanıt döndü: {str(data)[:500]}") from None
         self.contents.append({"role": "model", "parts": [{"text": text}]})
         return text
+
+
+class OpenRouterLLM:
+    """OpenRouter (OpenAI-compatible chat completions); conversation is kept for fix rounds."""
+
+    URL = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, api_key: str, model: str = "openrouter/free"):
+        self.api_key = api_key
+        self.model = model
+        self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    def ask(self, user_text: str) -> str:
+        import json
+        import urllib.error
+        import urllib.request
+
+        self.messages.append({"role": "user", "content": user_text})
+        req = urllib.request.Request(
+            self.URL,
+            data=json.dumps({"model": self.model, "messages": self.messages, "max_tokens": 8000}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "X-Title": "ScriptForge",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                data = json.load(r)
+        except urllib.error.HTTPError as e:
+            self.messages.pop()
+            raise RuntimeError(f"OpenRouter {e.code}: {e.read().decode(errors='replace')[:500]}") from None
+        try:
+            text = data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            self.messages.pop()
+            raise RuntimeError(f"OpenRouter hatalı yanıt: {str(data)[:500]}") from None
+        self.messages.append({"role": "assistant", "content": text})
+        return text
+
+
+def list_openrouter_models(free_only: bool = True, timeout: int = 30) -> list[str]:
+    """Public endpoint, no key needed. Free = ':free' suffix or zero prompt+completion price."""
+    import json
+    import urllib.request
+
+    with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=timeout) as r:
+        models = json.load(r)["data"]
+
+    def is_free(m):
+        pr = m.get("pricing") or {}
+        return m["id"].endswith(":free") or (str(pr.get("prompt")) == "0" and str(pr.get("completion")) == "0")
+
+    ids = sorted(m["id"] for m in models if not free_only or is_free(m))
+    return ids
+
+
+def make_llm(provider: str, api_key: str, model: str):
+    if provider == "OpenRouter":
+        return OpenRouterLLM(api_key, model)
+    return LLM(api_key, model)
+
+
+def env_key(provider: str) -> str:
+    for name in PROVIDERS[provider]["env"]:
+        if os.environ.get(name):
+            return os.environ[name]
+    return ""
 
 
 def install_requirements(pkgs: list[str], libs: Path, log: Callable[[str], None]) -> None:
