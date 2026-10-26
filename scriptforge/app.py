@@ -26,7 +26,7 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="API Key:").grid(row=0, column=0, sticky="w")
-        self.key = tk.StringVar(value=os.environ.get("ANTHROPIC_API_KEY", ""))
+        self.key = tk.StringVar(value=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", ""))
         ttk.Entry(top, textvariable=self.key, show="•", width=40).grid(row=0, column=1, padx=4)
         ttk.Label(top, text="Model:").grid(row=0, column=2, padx=(12, 0))
         self.model = tk.StringVar(value=core.DEFAULT_MODEL)
@@ -75,7 +75,7 @@ class App(tk.Tk):
         if not task:
             return messagebox.showinfo("ScriptForge", "Önce bir istek yaz.")
         if not self.key.get().strip():
-            return messagebox.showerror("ScriptForge", "ANTHROPIC_API_KEY gerekli.")
+            return messagebox.showerror("ScriptForge", "Gemini API key gerekli (GEMINI_API_KEY).")
         self.cancel_flag.clear()
         self.log.delete("1.0", "end")
         self.btn.config(state="disabled")

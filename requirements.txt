@@ -1,1 +1,1 @@
-anthropic>=0.40
+# Gemini REST API standart kütüphane ile çağrılır; ek bağımlılık yok.

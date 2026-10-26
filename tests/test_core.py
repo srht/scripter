@@ -41,3 +41,20 @@ def test_gives_up_after_max_attempts():
     with tempfile.TemporaryDirectory() as d:
         out = core.forge("x", Bad(), lambda m: None, workspace=Path(d), max_attempts=2, timeout=10)
         assert not out.result.ok and out.attempts == 2
+
+
+def test_gemini_client_parses_and_keeps_history(monkeypatch):
+    import io, json, urllib.request
+
+    seen = {}
+
+    def fake_urlopen(req, timeout=0):
+        seen["url"], seen["key"] = req.full_url, req.headers.get("X-goog-api-key")
+        seen["body"] = json.loads(req.data)
+        return io.BytesIO(json.dumps({"candidates": [{"content": {"parts": [{"text": "```python\nprint(1)\n```"}]}}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    llm = core.LLM("KEY", "gemini-x")
+    assert "print(1)" in llm.ask("hi")
+    assert "gemini-x:generateContent" in seen["url"] and seen["key"] == "KEY"
+    assert [c["role"] for c in llm.contents] == ["user", "model"]

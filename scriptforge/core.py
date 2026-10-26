@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_MODEL = "gemini-2.5-flash"
 WORKSPACE = Path(os.environ.get("SCRIPTFORGE_HOME", Path.home() / "ScriptForge"))
 
 SYSTEM_PROMPT = """You write single-file Python 3 scripts that do exactly what the user asks.
@@ -64,22 +64,42 @@ def parse_requirements(code: str) -> list[str]:
 
 
 class LLM:
-    """Thin wrapper over the Anthropic Messages API (conversation kept so fixes have context)."""
+    """Gemini API (REST) client; conversation is kept so fixes have context."""
+
+    URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
-        import anthropic
-
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.api_key = api_key
         self.model = model
-        self.messages: list[dict] = []
+        self.contents: list[dict] = []
 
     def ask(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
-        resp = self.client.messages.create(
-            model=self.model, max_tokens=8000, system=SYSTEM_PROMPT, messages=self.messages
+        import json
+        import urllib.error
+        import urllib.request
+
+        self.contents.append({"role": "user", "parts": [{"text": user_text}]})
+        body = json.dumps({
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": self.contents,
+            "generationConfig": {"maxOutputTokens": 8000},
+        }).encode()
+        req = urllib.request.Request(
+            self.URL.format(model=self.model), data=body,
+            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
         )
-        text = "".join(b.text for b in resp.content if b.type == "text")
-        self.messages.append({"role": "assistant", "content": text})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = json.load(r)
+        except urllib.error.HTTPError as e:
+            self.contents.pop()
+            raise RuntimeError(f"Gemini API {e.code}: {e.read().decode(errors='replace')[:500]}") from None
+        try:
+            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+        except (KeyError, IndexError):
+            self.contents.pop()
+            raise RuntimeError(f"Gemini boş/engellenmiş yanıt döndü: {str(data)[:500]}") from None
+        self.contents.append({"role": "model", "parts": [{"text": text}]})
         return text
 
 

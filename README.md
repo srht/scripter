@@ -1,13 +1,13 @@
 # ScriptForge
 
-Masaüstü penceresi: ne istediğini yaz → LLM (Claude) Python scriptini yazar → çalıştırır →
+Masaüstü penceresi: ne istediğini yaz → LLM (Google Gemini) Python scriptini yazar → çalıştırır →
 hata olursa hatayı LLM'e geri verip düzelttirir → başarılı olana (veya deneme limitine) kadar tekrarlar.
 Tek tık.
 
 ## Kurulum
 ```bash
-pip install -r requirements.txt     # Linux: sudo apt install python3-tk
-export ANTHROPIC_API_KEY=sk-ant-...
+# Linux: sudo apt install python3-tk  (ek pip paketi gerekmez)
+export GEMINI_API_KEY=...   # https://aistudio.google.com/apikey
 python -m scriptforge
 ```
 
