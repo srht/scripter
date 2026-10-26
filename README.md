@@ -13,6 +13,7 @@ python -m scriptforge
 ```
 
 ## Özellikler
+- **Kitaplık sekmesi:** üretilen tüm scriptler listelenir (tarih, istek, ✔/✘ durumu), arama yapılır; çift tıkla ya da "Çalıştır" ile LLM kullanmadan tekrar çalıştırılır. Kodu görme, kopyalama, klasörü açma ve silme de var.
 - Sağlayıcı seçimi: Gemini veya OpenRouter. OpenRouter'da "Ücretsiz modelleri getir" ile `:free` modeller listelenir, açılır kutudan seçilir (`openrouter/free` otomatik ücretsiz model seçer). Ücretsiz modellerin kalitesi/limiti değişkendir.
 - Üret → çalıştır → hata çıktısıyla otomatik debug döngüsü (varsayılan 4 deneme)
 - Script `# requirements:` satırı yazarsa paketler `~/ScriptForge/libs` içine kurulur

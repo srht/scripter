@@ -1,6 +1,7 @@
 """LLM -> script -> run -> auto-debug loop. No GUI imports here."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -207,6 +208,89 @@ def run_script(path: Path, libs: Path, timeout: int, proc_holder: Optional[list]
         return RunResult(-1, out or "", (err or "") + f"\n[timeout after {timeout}s]", timed_out=True)
 
 
+@dataclass
+class LibraryEntry:
+    dir: Path
+    request: str
+    created: str
+    ok: Optional[bool]
+    model: str = ""
+    attempts: int = 0
+
+    @property
+    def script(self) -> Path:
+        return self.dir / "script.py"
+
+    @property
+    def code(self) -> str:
+        return self.script.read_text(encoding="utf-8")
+
+
+def save_meta(run_dir: Path, request: str, llm, ok: bool, attempts: int) -> None:
+    meta = {
+        "request": request,
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "model": getattr(llm, "model", ""),
+        "ok": ok,
+        "attempts": attempts,
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def list_library(workspace: Path = WORKSPACE) -> list[LibraryEntry]:
+    """All saved scripts, newest first. Dirs without meta.json (older runs) still show up."""
+    root = workspace / "scripts"
+    entries: list[LibraryEntry] = []
+    if not root.is_dir():
+        return entries
+    for d in root.iterdir():
+        if not (d / "script.py").is_file():
+            continue
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        entries.append(LibraryEntry(
+            dir=d,
+            request=meta.get("request") or "(adsız)",
+            created=meta.get("created") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(d.stat().st_mtime)),
+            ok=meta.get("ok"),
+            model=meta.get("model", ""),
+            attempts=meta.get("attempts", 0),
+        ))
+    return sorted(entries, key=lambda e: e.created, reverse=True)
+
+
+def delete_entry(entry: LibraryEntry, workspace: Path = WORKSPACE) -> None:
+    import shutil
+
+    root = (workspace / "scripts").resolve()
+    target = entry.dir.resolve()
+    if target.parent != root:  # never delete outside the library
+        raise ValueError(f"Kitaplık dışında: {target}")
+    shutil.rmtree(target)
+
+
+def run_entry(
+    entry: LibraryEntry,
+    log: Callable[[str], None],
+    timeout: int = 60,
+    proc_holder: Optional[list] = None,
+    workspace: Path = WORKSPACE,
+) -> RunResult:
+    """Re-run a saved script as-is (no LLM involved)."""
+    libs = workspace / "libs"
+    install_requirements(parse_requirements(entry.code), libs, log)
+    log(f"çalıştırılıyor: {entry.script}")
+    result = run_script(entry.script, libs, timeout, proc_holder)
+    if result.stdout:
+        log("--- stdout ---\n" + result.stdout.rstrip())
+    if result.stderr:
+        log("--- stderr ---\n" + result.stderr.rstrip())
+    log(f"{'✔ Başarılı' if result.ok else '✘ Hata'} (çıkış kodu {result.returncode})")
+    return result
+
+
 def forge(
     request: str,
     llm,
@@ -228,6 +312,7 @@ def forge(
     log("LLM script yazıyor…")
     code = extract_code(llm.ask(f"Task: {request}"))
     result: Optional[RunResult] = None
+    save_meta(run_dir, request, llm, False, 0)
 
     for attempt in range(1, max_attempts + 1):
         if cancelled():
@@ -240,6 +325,7 @@ def forge(
         install_requirements(parse_requirements(code), libs, log)
         log(f"[{attempt}/{max_attempts}] çalıştırılıyor…")
         result = run_script(path, libs, timeout, proc_holder)
+        save_meta(run_dir, request, llm, result.ok, attempt)
         if result.stdout:
             log("--- stdout ---\n" + result.stdout.rstrip())
         if result.ok:

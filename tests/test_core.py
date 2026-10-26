@@ -80,3 +80,35 @@ def test_openrouter_client_and_free_filter(monkeypatch):
     assert len(core.list_openrouter_models(False)) == 3
     llm = core.make_llm("OpenRouter", "K", "a/b:free")
     assert "print(2)" in llm.ask("x") and llm.messages[-1]["role"] == "assistant"
+
+
+def test_library_lists_runs_and_deletes(tmp_path):
+    out = core.forge("print hello", FakeLLM(), lambda m: None, workspace=tmp_path, timeout=10)
+    # legacy dir without meta.json must still be listed
+    legacy = tmp_path / "scripts" / "19990101-000000"
+    legacy.mkdir()
+    (legacy / "script.py").write_text("print('legacy')\n")
+
+    entries = core.list_library(tmp_path)
+    assert len(entries) == 2
+    mine = next(e for e in entries if e.dir == out.path.parent)
+    assert mine.request == "print hello" and mine.ok is True and mine.attempts == 2
+
+    logs = []
+    res = core.run_entry(mine, logs.append, timeout=10, workspace=tmp_path)
+    assert res.ok and "hello 42" in "\n".join(logs)
+
+    core.delete_entry(mine, tmp_path)
+    assert [e.dir for e in core.list_library(tmp_path)] == [legacy]
+
+
+def test_delete_refuses_outside_library(tmp_path):
+    import pytest
+
+    (tmp_path / "scripts").mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    e = core.LibraryEntry(victim, "x", "2020", None)
+    with pytest.raises(ValueError):
+        core.delete_entry(e, tmp_path)
+    assert victim.exists()

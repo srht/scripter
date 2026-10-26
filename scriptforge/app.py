@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import platform
 import queue
+import subprocess
 import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
@@ -23,7 +25,15 @@ class App(tk.Tk):
         self.after(100, self._drain)
 
     def _build(self):
-        top = ttk.Frame(self, padding=8)
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True)
+        gen = ttk.Frame(nb)
+        lib = ttk.Frame(nb)
+        nb.add(gen, text="Üret")
+        nb.add(lib, text="📚 Kitaplık")
+        nb.bind("<<NotebookTabChanged>>", lambda e: self.lib_refresh() if nb.index("current") == 1 else None)
+        self._build_library(lib)
+        top = ttk.Frame(gen, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="Sağlayıcı:").grid(row=0, column=0, sticky="w")
         self.provider = tk.StringVar(value="Gemini")
@@ -44,7 +54,7 @@ class App(tk.Tk):
         self._prov = "Gemini"
         self.free_only = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Sadece ücretsiz", variable=self.free_only).grid(row=0, column=7)
-        top2 = ttk.Frame(self, padding=(8, 0))
+        top2 = ttk.Frame(gen, padding=(8, 0))
         top2.pack(fill="x")
         top = top2
         ttk.Label(top, text="Maks. deneme:").grid(row=0, column=0, padx=(12, 0))
@@ -54,13 +64,13 @@ class App(tk.Tk):
         self.timeout = tk.IntVar(value=60)
         ttk.Spinbox(top, from_=5, to=3600, textvariable=self.timeout, width=6).grid(row=0, column=3)
 
-        req = ttk.LabelFrame(self, text="Ne yapmak istiyorsun?", padding=6)
+        req = ttk.LabelFrame(gen, text="Ne yapmak istiyorsun?", padding=6)
         req.pack(fill="x", padx=8)
         self.request = scrolledtext.ScrolledText(req, height=4, wrap="word")
         self.request.pack(fill="x")
         self.request.bind("<Control-Return>", lambda e: (self.start(), "break")[1])
 
-        bar = ttk.Frame(self, padding=8)
+        bar = ttk.Frame(gen, padding=8)
         bar.pack(fill="x")
         self.btn = ttk.Button(bar, text="▶ Üret, Debug Et ve Çalıştır", command=self.start)
         self.btn.pack(side="left")
@@ -71,7 +81,7 @@ class App(tk.Tk):
         self.status = ttk.Label(bar, text="Hazır")
         self.status.pack(side="right")
 
-        pane = ttk.PanedWindow(self, orient="horizontal")
+        pane = ttk.PanedWindow(gen, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.code = self._box(pane, "Üretilen script")
         self.log = self._box(pane, "Günlük / çıktı")
@@ -82,6 +92,113 @@ class App(tk.Tk):
         t.pack(fill="both", expand=True)
         pane.add(f, weight=1)
         return t
+
+    # -- library -------------------------------------------------------
+    def _build_library(self, parent):
+        bar = ttk.Frame(parent, padding=8)
+        bar.pack(fill="x")
+        self.lib_run_btn = ttk.Button(bar, text="▶ Çalıştır", command=self.lib_run)
+        self.lib_run_btn.pack(side="left")
+        ttk.Button(bar, text="■ Durdur", command=self.stop).pack(side="left", padx=4)
+        ttk.Button(bar, text="Kopyala", command=self.lib_copy).pack(side="left", padx=4)
+        ttk.Button(bar, text="Klasörü aç", command=self.lib_open).pack(side="left", padx=4)
+        ttk.Button(bar, text="Sil", command=self.lib_delete).pack(side="left", padx=4)
+        ttk.Button(bar, text="⟳ Yenile", command=self.lib_refresh).pack(side="left", padx=4)
+        ttk.Label(bar, text="Ara:").pack(side="left", padx=(16, 2))
+        self.lib_filter = tk.StringVar()
+        self.lib_filter.trace_add("write", lambda *a: self.lib_refresh())
+        ttk.Entry(bar, textvariable=self.lib_filter, width=24).pack(side="left")
+        self.lib_status = ttk.Label(bar, text="")
+        self.lib_status.pack(side="right")
+
+        cols = ("created", "request", "state")
+        self.tree = ttk.Treeview(parent, columns=cols, show="headings", height=9, selectmode="browse")
+        for c, t, w in (("created", "Tarih", 140), ("request", "İstek", 620), ("state", "Durum", 80)):
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor="w", stretch=(c == "request"))
+        self.tree.pack(fill="x", padx=8)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._lib_show_code())
+        self.tree.bind("<Double-1>", lambda e: self.lib_run())
+        self.tree.bind("<Return>", lambda e: self.lib_run())
+
+        pane = ttk.PanedWindow(parent, orient="horizontal")
+        pane.pack(fill="both", expand=True, padx=8, pady=8)
+        self.lib_code = self._box(pane, "Script")
+        self.lib_out = self._box(pane, "Çıktı")
+        self.entries: dict[str, core.LibraryEntry] = {}
+
+    def lib_refresh(self):
+        needle = self.lib_filter.get().lower().strip()
+        sel = self.tree.selection()
+        self.tree.delete(*self.tree.get_children())
+        self.entries = {}
+        for e in core.list_library():
+            if needle and needle not in e.request.lower():
+                continue
+            state = {True: "✔", False: "✘", None: "?"}[e.ok]
+            iid = self.tree.insert("", "end", values=(e.created, e.request.replace("\n", " ")[:200], state))
+            self.entries[iid] = e
+        self.lib_status.config(text=f"{len(self.entries)} script")
+        if sel and sel[0] in self.tree.get_children():
+            self.tree.selection_set(sel[0])
+
+    def _lib_sel(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("ScriptForge", "Listeden bir script seç.")
+            return None
+        return self.entries.get(sel[0])
+
+    def _lib_show_code(self):
+        sel = self.tree.selection()
+        e = self.entries.get(sel[0]) if sel else None
+        if e:
+            self.lib_code.delete("1.0", "end")
+            try:
+                self.lib_code.insert("1.0", e.code)
+            except OSError as ex:
+                self.lib_code.insert("1.0", f"Okunamadı: {ex}")
+
+    def lib_run(self):
+        e = self._lib_sel()
+        if not e or (self.worker and self.worker.is_alive()):
+            return
+        self.cancel_flag.clear()
+        self.lib_out.delete("1.0", "end")
+        self.lib_run_btn.config(state="disabled")
+        self.lib_status.config(text="Çalışıyor…")
+
+        def job():
+            try:
+                core.run_entry(e, lambda m: self.q.put(("lib_log", m)), self.timeout.get(), self.proc)
+            except Exception as ex:
+                self.q.put(("lib_log", f"HATA: {ex}"))
+            self.q.put(("lib_done", None))
+
+        self.worker = threading.Thread(target=job, daemon=True)
+        self.worker.start()
+
+    def lib_copy(self):
+        e = self._lib_sel()
+        if e:
+            self.clipboard_clear()
+            self.clipboard_append(e.code)
+            self.lib_status.config(text="Kod panoya kopyalandı")
+
+    def lib_open(self):
+        e = self._lib_sel()
+        if not e:
+            return
+        if platform.system() == "Windows":
+            os.startfile(e.dir)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["open" if platform.system() == "Darwin" else "xdg-open", str(e.dir)])
+
+    def lib_delete(self):
+        e = self._lib_sel()
+        if e and messagebox.askyesno("Sil", f"Bu script kalıcı olarak silinsin mi?\n\n{e.request[:120]}"):
+            core.delete_entry(e)
+            self.lib_refresh()
 
     # -- provider / models ---------------------------------------------
     def _on_provider(self):
@@ -158,6 +275,7 @@ class App(tk.Tk):
             )
             ok = out.result is not None and out.result.ok
             self.q.put(("log", f"\nKaydedildi: {out.path}"))
+            self.q.put(("lib_refresh", None))
             self.q.put(("done", "Başarılı" if ok else ("İptal" if out.cancelled else "Başarısız")))
         except Exception as e:  # network/auth errors etc.
             self.q.put(("log", f"HATA: {e}"))
@@ -173,6 +291,14 @@ class App(tk.Tk):
                 elif kind == "code":
                     self.code.delete("1.0", "end")
                     self.code.insert("1.0", val)
+                elif kind == "lib_refresh":
+                    self.lib_refresh()
+                elif kind == "lib_log":
+                    self.lib_out.insert("end", val + "\n")
+                    self.lib_out.see("end")
+                elif kind == "lib_done":
+                    self.lib_run_btn.config(state="normal")
+                    self.lib_status.config(text="Bitti")
                 elif kind == "models":
                     self.model_box.config(values=["openrouter/free"] + [m for m in val if m != "openrouter/free"])
                     self.status.config(text=f"{len(val)} model bulundu")
