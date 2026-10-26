@@ -64,7 +64,7 @@ def test_openrouter_client_and_free_filter(monkeypatch):
     import io, json, urllib.request
 
     def fake_urlopen(req, timeout=0):
-        if req.full_url.endswith("/models"):
+        if isinstance(req, str):
             return io.BytesIO(json.dumps({"data": [
                 {"id": "a/b:free", "pricing": {"prompt": "0", "completion": "0"}},
                 {"id": "c/d", "pricing": {"prompt": "0.001", "completion": "0.002"}},
