@@ -13,6 +13,7 @@ python -m scriptforge
 ```
 
 ## Özellikler
+- **Düzenleme (Kitaplık):** sağ paneldeki kod doğrudan düzenlenir (💾 Kaydet; "Çalıştır" önce otomatik kaydeder). "✨ LLM ile değiştir" ile "şunu da ekle" gibi bir talimat verirsin; LLM mevcut kodu değiştirir, yine çalıştırıp hata varsa debug eder. Her değişiklikte eski sürüm `history/` altına yedeklenir, "↶ Önceki sürüm" ile geri alınır.
 - **Kitaplık sekmesi:** üretilen tüm scriptler listelenir (tarih, istek, ✔/✘ durumu), arama yapılır; çift tıkla ya da "Çalıştır" ile LLM kullanmadan tekrar çalıştırılır. Kodu görme, kopyalama, klasörü açma ve silme de var.
 - Sağlayıcı seçimi: Gemini veya OpenRouter. OpenRouter'da "Ücretsiz modelleri getir" ile `:free` modeller listelenir, açılır kutudan seçilir (`openrouter/free` otomatik ücretsiz model seçer). Ücretsiz modellerin kalitesi/limiti değişkendir.
 - Üret → çalıştır → hata çıktısıyla otomatik debug döngüsü (varsayılan 4 deneme)

@@ -265,15 +265,65 @@ class LibraryEntry:
         return self.script.read_text(encoding="utf-8")
 
 
-def save_meta(run_dir: Path, request: str, llm, ok: bool, attempts: int) -> None:
+def save_meta(run_dir: Path, request: str, llm, ok: bool, attempts: int, edit: bool = False) -> None:
+    """Write meta.json. For edits the original request/created are kept and the instruction is appended to `edits`."""
+    f = run_dir / "meta.json"
+    try:
+        old = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
     meta = {
-        "request": request,
-        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "model": getattr(llm, "model", ""),
+        "request": old.get("request") or request,
+        "created": old.get("created") or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "model": getattr(llm, "model", "") or old.get("model", ""),
         "ok": ok,
         "attempts": attempts,
+        "edits": list(old.get("edits", [])),
     }
-    (run_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    if edit and (not meta["edits"] or meta["edits"][-1] != request):
+        meta["edits"].append(request)
+    f.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def backup_script(d: Path) -> Optional[Path]:
+    """Copy script.py to history/<timestamp>.py (skipped if identical to the newest backup)."""
+    src = d / "script.py"
+    if not src.is_file():
+        return None
+    hist = d / "history"
+    hist.mkdir(exist_ok=True)
+    last = sorted(hist.glob("*.py"))[-1:] 
+    if last and last[0].read_text(encoding="utf-8") == src.read_text(encoding="utf-8"):
+        return last[0]
+    dst = hist / (time.strftime("%Y%m%d-%H%M%S") + ".py")
+    n = 1
+    while dst.exists():
+        dst = hist / f"{time.strftime('%Y%m%d-%H%M%S')}-{n}.py"
+        n += 1
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    return dst
+
+
+def save_code(entry: "LibraryEntry", code: str) -> None:
+    """Persist a manual edit; the previous version goes to history/."""
+    if not code.endswith("\n"):
+        code += "\n"
+    if entry.script.is_file() and entry.script.read_text(encoding="utf-8") == code:
+        return
+    backup_script(entry.dir)
+    entry.script.write_text(code, encoding="utf-8")
+
+
+def restore_previous(entry: "LibraryEntry") -> bool:
+    """Swap script.py with the newest history version. Returns False if there is none."""
+    hist = sorted((entry.dir / "history").glob("*.py"))
+    if not hist:
+        return False
+    prev = hist[-1].read_text(encoding="utf-8")
+    cur = entry.script.read_text(encoding="utf-8")
+    entry.script.write_text(prev, encoding="utf-8")
+    hist[-1].write_text(cur, encoding="utf-8")  # so a second restore toggles back
+    return True
 
 
 def list_library(workspace: Path = WORKSPACE) -> list[LibraryEntry]:
@@ -344,17 +394,28 @@ def forge(
     proc_holder: Optional[list] = None,
     workspace: Path = WORKSPACE,
     on_output: Optional[Callable[[str, str], None]] = None,
+    base: Optional["LibraryEntry"] = None,
 ) -> Outcome:
-    """Generate a script for `request`, run it, and ask the LLM to fix it on failure."""
-    run_dir = workspace / "scripts" / time.strftime("%Y%m%d-%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    """Generate a script for `request`, run it, and ask the LLM to fix it on failure.
+    With `base`, `request` is an edit instruction applied to that saved script (in place; old version -> history/)."""
     libs = workspace / "libs"
+    if base is None:
+        run_dir = workspace / "scripts" / time.strftime("%Y%m%d-%H%M%S")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log("LLM script yazıyor…")
+        code = extract_code(llm.ask(f"Task: {request}"))
+    else:
+        run_dir = base.dir
+        backup_script(run_dir)
+        log("LLM scripti değiştiriyor…")
+        code = extract_code(llm.ask(
+            "Here is the current script:\n```python\n" + base.code + "\n```\n"
+            f"Modify it as follows: {request}\nKeep everything else working. Return the complete updated script."
+        ))
     path = run_dir / "script.py"
-
-    log("LLM script yazıyor…")
-    code = extract_code(llm.ask(f"Task: {request}"))
     result: Optional[RunResult] = None
-    save_meta(run_dir, request, llm, False, 0)
+    edit = base is not None
+    save_meta(run_dir, request, llm, False, 0, edit)
 
     for attempt in range(1, max_attempts + 1):
         if cancelled():
@@ -367,7 +428,7 @@ def forge(
         install_requirements(parse_requirements(code), libs, log)
         log(f"[{attempt}/{max_attempts}] çalıştırılıyor…")
         result = run_script(path, libs, timeout, proc_holder, on_output, interactive=on_output is not None)
-        save_meta(run_dir, request, llm, result.ok, attempt)
+        save_meta(run_dir, request, llm, result.ok, attempt, edit)
         if result.stdout and on_output is None:
             log("--- stdout ---\n" + result.stdout.rstrip())
         if result.ok:

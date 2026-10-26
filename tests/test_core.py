@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 
@@ -150,3 +151,40 @@ def test_timeout_still_kills(tmp_path):
     p = _script(tmp_path, "import time\ntime.sleep(30)\n")
     r = core.run_script(p, tmp_path / "libs", timeout=1)
     assert r.timed_out and not r.ok
+
+
+def test_manual_edit_history_and_restore(tmp_path):
+    out = core.forge("print hello", FakeLLM(), lambda m: None, workspace=tmp_path, timeout=10)
+    e = core.list_library(tmp_path)[0]
+    core.save_code(e, "print('v2')")
+    assert e.code == "print('v2')\n"
+    assert len(list((e.dir / "history").glob("*.py"))) == 1
+    core.save_code(e, "print('v2')\n")  # unchanged -> no new backup
+    assert len(list((e.dir / "history").glob("*.py"))) == 1
+    assert core.restore_previous(e) and "hello 42" in e.code
+    assert core.restore_previous(e) and "v2" in e.code  # toggles back
+
+
+class EditLLM:
+    def __init__(self):
+        self.prompts = []
+
+    def ask(self, text):
+        self.prompts.append(text)
+        return "```python\nprint('edited')\n```"
+
+
+def test_llm_edit_in_place_keeps_original_request(tmp_path):
+    core.forge("print hello", FakeLLM(), lambda m: None, workspace=tmp_path, timeout=10)
+    e = core.list_library(tmp_path)[0]
+    llm = EditLLM()
+    out = core.forge("make it say edited", llm, lambda m: None, workspace=tmp_path, timeout=10, base=e)
+    assert out.result.ok and out.path == e.script
+    assert "hello 42" in llm.prompts[0] and "make it say edited" in llm.prompts[0]  # current code sent to LLM
+    assert "edited" in e.code
+    assert len(core.list_library(tmp_path)) == 1  # edited in place, no new entry
+    again = core.list_library(tmp_path)[0]
+    assert again.request == "print hello" and again.ok is True
+    meta = json.loads((e.dir / "meta.json").read_text())
+    assert meta["edits"] == ["make it say edited"]
+    assert any("hello 42" in f.read_text() for f in (e.dir / "history").glob("*.py"))

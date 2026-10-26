@@ -7,7 +7,7 @@ import queue
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
 from . import core
 
@@ -21,6 +21,7 @@ class App(tk.Tk):
         self.cancel_flag = threading.Event()
         self.proc: list = []
         self.cur_out = None
+        self._lib_cur = None
         self.worker: threading.Thread | None = None
         self._build()
         self.after(100, self._drain)
@@ -138,6 +139,9 @@ class App(tk.Tk):
         self.lib_run_btn = ttk.Button(bar, text="▶ Çalıştır", command=self.lib_run)
         self.lib_run_btn.pack(side="left")
         ttk.Button(bar, text="■ Durdur", command=self.stop).pack(side="left", padx=4)
+        ttk.Button(bar, text="💾 Kaydet", command=lambda: self._lib_save(True)).pack(side="left", padx=(12, 4))
+        ttk.Button(bar, text="✨ LLM ile değiştir", command=self.lib_revise).pack(side="left", padx=4)
+        ttk.Button(bar, text="↶ Önceki sürüm", command=self.lib_restore).pack(side="left", padx=4)
         ttk.Button(bar, text="Kopyala", command=self.lib_copy).pack(side="left", padx=4)
         ttk.Button(bar, text="Klasörü aç", command=self.lib_open).pack(side="left", padx=4)
         ttk.Button(bar, text="Sil", command=self.lib_delete).pack(side="left", padx=4)
@@ -189,20 +193,102 @@ class App(tk.Tk):
             return None
         return self.entries.get(sel[0])
 
+    def _lib_dirty(self) -> bool:
+        return self._lib_cur is not None and bool(self.lib_code.edit_modified())
+
+    def _lib_save(self, announce: bool = False) -> bool:
+        """Write the editor text to the current script (old version -> history/)."""
+        e = self._lib_cur
+        if e is None:
+            if announce:
+                messagebox.showinfo("ScriptForge", "Listeden bir script seç.")
+            return False
+        try:
+            core.save_code(e, self.lib_code.get("1.0", "end-1c"))
+        except OSError as ex:
+            messagebox.showerror("ScriptForge", f"Kaydedilemedi: {ex}")
+            return False
+        self.lib_code.edit_modified(False)
+        if announce:
+            self.lib_status.config(text="Kaydedildi")
+        return True
+
+    def _lib_load(self, e):
+        self._lib_cur = e
+        self.lib_code.delete("1.0", "end")
+        try:
+            self.lib_code.insert("1.0", e.code)
+        except OSError as ex:
+            self.lib_code.insert("1.0", f"Okunamadı: {ex}")
+        self.lib_code.edit_modified(False)
+
     def _lib_show_code(self):
         sel = self.tree.selection()
         e = self.entries.get(sel[0]) if sel else None
-        if e:
-            self.lib_code.delete("1.0", "end")
+        if not e or (self._lib_cur and e.dir == self._lib_cur.dir):
+            return  # same script (e.g. list refresh) - never clobber unsaved edits
+        if self._lib_dirty() and messagebox.askyesno("Kaydet", "Kaydedilmemiş değişiklikler var. Kaydedilsin mi?"):
+            self._lib_save()
+        self._lib_load(e)
+
+    def lib_revise(self):
+        e = self._lib_cur
+        if not e:
+            return messagebox.showinfo("ScriptForge", "Listeden bir script seç.")
+        if self.worker and self.worker.is_alive():
+            return
+        if not self.key.get().strip():
+            return messagebox.showerror("ScriptForge", f"{self.provider.get()} API key gerekli (Üret sekmesinde).")
+        instr = simpledialog.askstring("LLM ile değiştir", "Scriptte ne değişsin?", parent=self)
+        if not instr or not instr.strip():
+            return
+        if not self._lib_save():
+            return
+        self.cancel_flag.clear()
+        self.cur_out = self.lib_out
+        self.lib_out.delete("1.0", "end")
+        self.lib_run_btn.config(state="disabled")
+        self.lib_status.config(text="LLM çalışıyor…")
+        prov, key, model = self.provider.get(), self.key.get().strip(), self.model.get().strip()
+        attempts, timeout = self.attempts.get(), self.timeout.get()
+
+        def job():
             try:
-                self.lib_code.insert("1.0", e.code)
-            except OSError as ex:
-                self.lib_code.insert("1.0", f"Okunamadı: {ex}")
+                llm = core.make_llm(prov, key, model)
+                core.forge(
+                    instr.strip(), llm,
+                    log=lambda m: self.q.put(("lib_log", m)),
+                    on_code=lambda c: self.q.put(("lib_code", c)),
+                    max_attempts=attempts, timeout=timeout,
+                    cancelled=self.cancel_flag.is_set, proc_holder=self.proc,
+                    on_output=self._emit, base=e,
+                )
+                self.q.put(("lib_log", "\nÖnceki sürüm 'history' klasöründe; '↶ Önceki sürüm' ile geri alabilirsin."))
+            except Exception as ex:
+                self.q.put(("lib_log", f"HATA: {ex}"))
+            self.q.put(("lib_done", None))
+
+        self.worker = threading.Thread(target=job, daemon=True)
+        self.worker.start()
+
+    def lib_restore(self):
+        e = self._lib_cur
+        if not e:
+            return messagebox.showinfo("ScriptForge", "Listeden bir script seç.")
+        if self._lib_dirty() and not self._lib_save():
+            return
+        if core.restore_previous(e):
+            self._lib_load(e)
+            self.lib_status.config(text="Önceki sürüme dönüldü (tekrar basarsan geri gelir)")
+        else:
+            messagebox.showinfo("ScriptForge", "Önceki sürüm yok.")
 
     def lib_run(self):
         e = self._lib_sel()
         if not e or (self.worker and self.worker.is_alive()):
             return
+        if self._lib_cur and e.dir == self._lib_cur.dir and not self._lib_save():
+            return  # run what is in the editor
         self.cancel_flag.clear()
         self.cur_out = self.lib_out
         self.lib_out.delete("1.0", "end")
@@ -223,7 +309,7 @@ class App(tk.Tk):
         e = self._lib_sel()
         if e:
             self.clipboard_clear()
-            self.clipboard_append(e.code)
+            self.clipboard_append(self.lib_code.get("1.0", "end-1c") if self._lib_cur and e.dir == self._lib_cur.dir else e.code)
             self.lib_status.config(text="Kod panoya kopyalandı")
 
     def lib_open(self):
@@ -239,6 +325,10 @@ class App(tk.Tk):
         e = self._lib_sel()
         if e and messagebox.askyesno("Sil", f"Bu script kalıcı olarak silinsin mi?\n\n{e.request[:120]}"):
             core.delete_entry(e)
+            if self._lib_cur and self._lib_cur.dir == e.dir:
+                self._lib_cur = None
+                self.lib_code.delete("1.0", "end")
+                self.lib_code.edit_modified(False)
             self.lib_refresh()
 
     # -- provider / models ---------------------------------------------
@@ -346,8 +436,13 @@ class App(tk.Tk):
                 elif kind == "lib_log":
                     self.lib_out.insert("end", val + "\n")
                     self.lib_out.see("end")
+                elif kind == "lib_code":
+                    self.lib_code.delete("1.0", "end")
+                    self.lib_code.insert("1.0", val)
+                    self.lib_code.edit_modified(False)
                 elif kind == "lib_done":
                     self.lib_run_btn.config(state="normal")
+                    self.lib_refresh()
                     self.lib_status.config(text="Bitti")
                 elif kind == "models":
                     self.model_box.config(values=["openrouter/free"] + [m for m in val if m != "openrouter/free"])
