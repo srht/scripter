@@ -21,7 +21,7 @@ WORKSPACE = Path(os.environ.get("SCRIPTFORGE_HOME", Path.home() / "ScriptForge")
 SYSTEM_PROMPT = """You write single-file Python 3 scripts that do exactly what the user asks.
 Rules:
 - Reply with ONE fenced ```python code block and nothing else of substance.
-- The script must run non-interactively (no input(), no GUI that blocks forever unless the user asked for one).
+- Do not use input() unless the task genuinely needs the user to type something; if it does, print a clear prompt first (stdin is wired to the app's input box). Otherwise run non-interactively. No blocking GUI unless the user asked for one.
 - Print meaningful results to stdout.
 - Prefer the standard library. If third-party packages are required, put a first line
   `# requirements: pkg1, pkg2` (pip names) at the very top of the script.
@@ -190,22 +190,61 @@ def install_requirements(pkgs: list[str], libs: Path, log: Callable[[str], None]
         log("pip failed:\n" + p.stderr[-1500:])
 
 
-def run_script(path: Path, libs: Path, timeout: int, proc_holder: Optional[list] = None) -> RunResult:
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+def run_script(
+    path: Path,
+    libs: Path,
+    timeout: int,
+    proc_holder: Optional[list] = None,
+    on_output: Optional[Callable[[str, str], None]] = None,
+    interactive: bool = False,
+) -> RunResult:
+    """Run a script. on_output(stream, text) gets live chunks ("out"/"err").
+    interactive=True connects stdin to a pipe (proc.stdin) so input() can be answered;
+    otherwise stdin is closed and input() fails fast with EOFError. timeout<=0 means no limit."""
+    import codecs
+    import threading
+
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(libs), env.get("PYTHONPATH", "")]))
     proc = subprocess.Popen(
         [sys.executable, str(path)], cwd=path.parent, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if proc_holder is not None:
         proc_holder[:] = [proc]
+
+    bufs: dict[str, list[str]] = {"out": [], "err": []}
+
+    def pump(stream, key):
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        while True:
+            chunk = os.read(stream.fileno(), 4096)
+            if not chunk:
+                break
+            text = dec.decode(chunk)
+            bufs[key].append(text)
+            if on_output and text:
+                on_output(key, text)
+
+    threads = [threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True)]
+    for t in threads:
+        t.start()
+    timed_out = False
     try:
-        out, err = proc.communicate(timeout=timeout)
-        return RunResult(proc.returncode, out, err)
+        proc.wait(timeout=timeout if timeout and timeout > 0 else None)
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, err = proc.communicate()
-        return RunResult(-1, out or "", (err or "") + f"\n[timeout after {timeout}s]", timed_out=True)
+        proc.wait()
+        timed_out = True
+    for t in threads:
+        t.join(timeout=5)
+    out, err = "".join(bufs["out"]), "".join(bufs["err"])
+    if timed_out:
+        err += f"\n[timeout after {timeout}s]"
+        return RunResult(-1, out, err, timed_out=True)
+    return RunResult(proc.returncode, out, err)
 
 
 @dataclass
@@ -277,17 +316,19 @@ def run_entry(
     timeout: int = 60,
     proc_holder: Optional[list] = None,
     workspace: Path = WORKSPACE,
+    on_output: Optional[Callable[[str, str], None]] = None,
 ) -> RunResult:
-    """Re-run a saved script as-is (no LLM involved)."""
+    """Re-run a saved script as-is (no LLM involved). With on_output the run is interactive."""
     libs = workspace / "libs"
     install_requirements(parse_requirements(entry.code), libs, log)
     log(f"çalıştırılıyor: {entry.script}")
-    result = run_script(entry.script, libs, timeout, proc_holder)
-    if result.stdout:
-        log("--- stdout ---\n" + result.stdout.rstrip())
-    if result.stderr:
-        log("--- stderr ---\n" + result.stderr.rstrip())
-    log(f"{'✔ Başarılı' if result.ok else '✘ Hata'} (çıkış kodu {result.returncode})")
+    result = run_script(entry.script, libs, timeout, proc_holder, on_output, interactive=on_output is not None)
+    if on_output is None:
+        if result.stdout:
+            log("--- stdout ---\n" + result.stdout.rstrip())
+        if result.stderr:
+            log("--- stderr ---\n" + result.stderr.rstrip())
+    log(f"\n{'✔ Başarılı' if result.ok else '✘ Hata'} (çıkış kodu {result.returncode})")
     return result
 
 
@@ -302,6 +343,7 @@ def forge(
     cancelled: Callable[[], bool] = lambda: False,
     proc_holder: Optional[list] = None,
     workspace: Path = WORKSPACE,
+    on_output: Optional[Callable[[str, str], None]] = None,
 ) -> Outcome:
     """Generate a script for `request`, run it, and ask the LLM to fix it on failure."""
     run_dir = workspace / "scripts" / time.strftime("%Y%m%d-%H%M%S")
@@ -324,19 +366,20 @@ def forge(
 
         install_requirements(parse_requirements(code), libs, log)
         log(f"[{attempt}/{max_attempts}] çalıştırılıyor…")
-        result = run_script(path, libs, timeout, proc_holder)
+        result = run_script(path, libs, timeout, proc_holder, on_output, interactive=on_output is not None)
         save_meta(run_dir, request, llm, result.ok, attempt)
-        if result.stdout:
+        if result.stdout and on_output is None:
             log("--- stdout ---\n" + result.stdout.rstrip())
         if result.ok:
-            log("✔ Başarılı.")
+            log("\n✔ Başarılı.")
             return Outcome(code, result, attempt, path)
         if cancelled():
             return Outcome(code, result, attempt, path, cancelled=True)
-        log("--- stderr ---\n" + (result.stderr.rstrip() or "(boş)"))
+        if on_output is None:
+            log("--- stderr ---\n" + (result.stderr.rstrip() or "(boş)"))
         if attempt == max_attempts:
             break
-        log("✘ Hata — LLM debug ediyor…")
+        log("\n✘ Hata — LLM debug ediyor…")
         code = extract_code(llm.ask(
             "The script failed.\n\nstdout:\n" + result.stdout[-3000:] +
             "\n\nstderr:\n" + result.stderr[-4000:] +

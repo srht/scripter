@@ -112,3 +112,41 @@ def test_delete_refuses_outside_library(tmp_path):
     with pytest.raises(ValueError):
         core.delete_entry(e, tmp_path)
     assert victim.exists()
+
+
+def _script(tmp_path, body):
+    p = tmp_path / "s.py"
+    p.write_text(body)
+    return p
+
+
+def test_input_fails_fast_when_not_interactive(tmp_path):
+    p = _script(tmp_path, "print(input('adın? '))\n")
+    r = core.run_script(p, tmp_path / "libs", timeout=10)
+    assert not r.ok and "EOFError" in r.stderr
+
+
+def test_interactive_input_and_live_output(tmp_path):
+    import threading, time
+
+    p = _script(tmp_path, "name = input('adın? ')\nprint('merhaba', name)\n")
+    holder, chunks = [], []
+
+    def feeder():
+        while not holder:
+            time.sleep(0.02)
+        while "adın?" not in "".join(t for _, t in chunks):  # wait for the prompt (no newline!)
+            time.sleep(0.02)
+        holder[0].stdin.write(b"Ali\n")
+        holder[0].stdin.flush()
+
+    threading.Thread(target=feeder, daemon=True).start()
+    r = core.run_script(p, tmp_path / "libs", 10, holder, lambda s, t: chunks.append((s, t)), interactive=True)
+    assert r.ok and "merhaba Ali" in r.stdout
+    assert "adın?" in "".join(t for _, t in chunks)
+
+
+def test_timeout_still_kills(tmp_path):
+    p = _script(tmp_path, "import time\ntime.sleep(30)\n")
+    r = core.run_script(p, tmp_path / "libs", timeout=1)
+    assert r.timed_out and not r.ok

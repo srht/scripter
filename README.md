@@ -17,6 +17,7 @@ python -m scriptforge
 - Sağlayıcı seçimi: Gemini veya OpenRouter. OpenRouter'da "Ücretsiz modelleri getir" ile `:free` modeller listelenir, açılır kutudan seçilir (`openrouter/free` otomatik ücretsiz model seçer). Ücretsiz modellerin kalitesi/limiti değişkendir.
 - Üret → çalıştır → hata çıktısıyla otomatik debug döngüsü (varsayılan 4 deneme)
 - Script `# requirements:` satırı yazarsa paketler `~/ScriptForge/libs` içine kurulur
+- Canlı çıktı + etkileşimli girdi: script `input()` isterse pencerenin altındaki "Script'e girdi" kutusuna yazıp Enter'a bas (EOF butonu stdin'i kapatır). Girdi isteyen scriptlerde zaman aşımını 0 (sınırsız) yap.
 - Zaman aşımı, Durdur butonu, "çalıştırmadan önce onayla" seçeneği
 - Her çalıştırma `~/ScriptForge/scripts/<tarih>/script.py` olarak saklanır (`SCRIPTFORGE_HOME` ile değişir)
 

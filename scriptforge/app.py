@@ -20,6 +20,7 @@ class App(tk.Tk):
         self.q: queue.Queue = queue.Queue()
         self.cancel_flag = threading.Event()
         self.proc: list = []
+        self.cur_out = None
         self.worker: threading.Thread | None = None
         self._build()
         self.after(100, self._drain)
@@ -60,9 +61,9 @@ class App(tk.Tk):
         ttk.Label(top, text="Maks. deneme:").grid(row=0, column=0, padx=(12, 0))
         self.attempts = tk.IntVar(value=4)
         ttk.Spinbox(top, from_=1, to=10, textvariable=self.attempts, width=4).grid(row=0, column=1)
-        ttk.Label(top, text="Zaman aşımı (sn):").grid(row=0, column=2, padx=(12, 0))
+        ttk.Label(top, text="Zaman aşımı (sn, 0=sınırsız):").grid(row=0, column=2, padx=(12, 0))
         self.timeout = tk.IntVar(value=60)
-        ttk.Spinbox(top, from_=5, to=3600, textvariable=self.timeout, width=6).grid(row=0, column=3)
+        ttk.Spinbox(top, from_=0, to=3600, textvariable=self.timeout, width=6).grid(row=0, column=3)
 
         req = ttk.LabelFrame(gen, text="Ne yapmak istiyorsun?", padding=6)
         req.pack(fill="x", padx=8)
@@ -85,6 +86,43 @@ class App(tk.Tk):
         pane.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.code = self._box(pane, "Üretilen script")
         self.log = self._box(pane, "Günlük / çıktı")
+        self.log.tag_config("err", foreground="#c0392b")
+        self._input_bar(gen)
+
+    def _input_bar(self, parent):
+        """Sends a line to the running script's stdin (answers input())."""
+        f = ttk.Frame(parent, padding=(8, 0, 8, 8))
+        f.pack(fill="x", side="bottom")
+        ttk.Label(f, text="Script'e girdi:").pack(side="left")
+        var = tk.StringVar()
+        e = ttk.Entry(f, textvariable=var)
+        e.pack(side="left", fill="x", expand=True, padx=6)
+        send = lambda *_: (self.send_input(var.get()), var.set(""))
+        e.bind("<Return>", send)
+        ttk.Button(f, text="Gönder", command=send).pack(side="left")
+        ttk.Button(f, text="EOF", command=self.close_stdin).pack(side="left", padx=(4, 0))
+
+    def send_input(self, line: str):
+        p = self.proc[0] if self.proc else None
+        if not p or p.poll() is not None or p.stdin is None:
+            return
+        try:
+            p.stdin.write((line + "\n").encode())
+            p.stdin.flush()
+            self.q.put(("echo", line + "\n"))
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def close_stdin(self):
+        p = self.proc[0] if self.proc else None
+        if p and p.stdin:
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
+
+    def _emit(self, stream: str, text: str):
+        self.q.put(("out", (stream, text)))
 
     def _box(self, pane, title):
         f = ttk.LabelFrame(pane, text=title, padding=4)
@@ -125,6 +163,8 @@ class App(tk.Tk):
         pane.pack(fill="both", expand=True, padx=8, pady=8)
         self.lib_code = self._box(pane, "Script")
         self.lib_out = self._box(pane, "Çıktı")
+        self.lib_out.tag_config("err", foreground="#c0392b")
+        self._input_bar(parent)
         self.entries: dict[str, core.LibraryEntry] = {}
 
     def lib_refresh(self):
@@ -164,13 +204,14 @@ class App(tk.Tk):
         if not e or (self.worker and self.worker.is_alive()):
             return
         self.cancel_flag.clear()
+        self.cur_out = self.lib_out
         self.lib_out.delete("1.0", "end")
         self.lib_run_btn.config(state="disabled")
         self.lib_status.config(text="Çalışıyor…")
 
         def job():
             try:
-                core.run_entry(e, lambda m: self.q.put(("lib_log", m)), self.timeout.get(), self.proc)
+                core.run_entry(e, lambda m: self.q.put(("lib_log", m)), self.timeout.get(), self.proc, on_output=self._emit)
             except Exception as ex:
                 self.q.put(("lib_log", f"HATA: {ex}"))
             self.q.put(("lib_done", None))
@@ -238,6 +279,7 @@ class App(tk.Tk):
         if not self.key.get().strip():
             return messagebox.showerror("ScriptForge", f"{self.provider.get()} API key gerekli.")
         self.cancel_flag.clear()
+        self.cur_out = self.log
         self.log.delete("1.0", "end")
         self.btn.config(state="disabled")
         self.stop_btn.config(state="normal")
@@ -272,6 +314,7 @@ class App(tk.Tk):
                 confirm=self._confirm if self.review.get() else None,
                 cancelled=self.cancel_flag.is_set,
                 proc_holder=self.proc,
+                on_output=self._emit,
             )
             ok = out.result is not None and out.result.ok
             self.q.put(("log", f"\nKaydedildi: {out.path}"))
@@ -291,6 +334,13 @@ class App(tk.Tk):
                 elif kind == "code":
                     self.code.delete("1.0", "end")
                     self.code.insert("1.0", val)
+                elif kind == "out":
+                    stream, text = val
+                    self.cur_out.insert("end", text, "err" if stream == "err" else ())
+                    self.cur_out.see("end")
+                elif kind == "echo":
+                    self.cur_out.insert("end", val)
+                    self.cur_out.see("end")
                 elif kind == "lib_refresh":
                     self.lib_refresh()
                 elif kind == "lib_log":
